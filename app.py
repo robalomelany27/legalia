@@ -6,7 +6,7 @@ from openai import OpenAI
 from docx import Document
 from io import BytesIO
 import hashlib
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 # --- CONFIGURACIÓN E INICIALIZACIÓN ---
 st.set_page_config(page_title="LegalAI - Revisor de Contratos", layout="centered")
 
