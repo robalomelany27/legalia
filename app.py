@@ -15,7 +15,7 @@ st.set_page_config(page_title="LegalAI - Revisor de Contratos", layout="centered
 
 # Si usas secrets.toml (Recomendado):
 try:
-    client = OpenAI(api_key=st.secrets["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"])
+    client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 except:
     st.warning("⚠️ No se detectó API Key en secrets.toml. La App fallará al intentar analizar.")
 
