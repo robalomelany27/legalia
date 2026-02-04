@@ -7,30 +7,38 @@ from docx import Document
 from io import BytesIO
 import hashlib
 from pypdf import PdfReader
-# --- CONFIGURACIÓN E INICIALIZACIÓN ---
-st.set_page_config(page_title="LegalAI - Revisor de Contratos", layout="centered")
 
-# INTRODUCE TU API KEY AQUÍ SI NO USAS SECRETS
-# client = OpenAI(api_key="sk-TU-CLAVE-AQUI")
+# --- CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(
+    page_title="Abogado IA de Bolsillo", 
+    page_icon="⚖️",
+    layout="centered", # 'centered' se ve mejor en móviles que 'wide'
+    initial_sidebar_state="collapsed" # Menú cerrado por defecto en móvil
+)
 
-# Si usas secrets.toml (Recomendado):
+# --- ESTILOS CSS PARA MÓVIL ---
+st.markdown("""
+<style>
+    /* Ajuste para que el chat no se superponga */
+    .stChatInput {position: fixed; bottom: 0; padding-bottom: 20px; z-index: 99;}
+    /* Botones más grandes para dedos en móvil */
+    .stButton button {width: 100%; border-radius: 10px; height: 50px;}
+</style>
+""", unsafe_allow_html=True)
+
+# --- API KEY ---
 try:
     client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 except:
-    st.warning("⚠️ No se detectó API Key en secrets.toml. La App fallará al intentar analizar.")
+    st.error("⚠️ Falta configurar la API Key en secrets.toml")
 
-# --- BASE DE DATOS (SQLite) ---
+# --- BASE DE DATOS ---
 def init_db():
     conn = sqlite3.connect('legal_app.db')
     c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users
-                 (username TEXT PRIMARY KEY, password TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                  username TEXT, 
-                  date TEXT, 
-                  filename TEXT, 
-                  analysis TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS history 
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT, date TEXT, filename TEXT, analysis TEXT)''')
     conn.commit()
     conn.close()
 
@@ -38,23 +46,19 @@ def make_hashes(password):
     return hashlib.sha256(str.encode(password)).hexdigest()
 
 def check_hashes(password, hashed_text):
-    if make_hashes(password) == hashed_text:
-        return True
-    return False
+    return make_hashes(password) == hashed_text
 
 def add_user(username, password):
     conn = sqlite3.connect('legal_app.db')
     c = conn.cursor()
-    c.execute('INSERT INTO users(username, password) VALUES (?,?)', 
-              (username, make_hashes(password)))
+    c.execute('INSERT INTO users(username, password) VALUES (?,?)', (username, make_hashes(password)))
     conn.commit()
     conn.close()
 
 def login_user(username, password):
     conn = sqlite3.connect('legal_app.db')
     c = conn.cursor()
-    c.execute('SELECT * FROM users WHERE username =? AND password = ?', 
-              (username, make_hashes(password)))
+    c.execute('SELECT * FROM users WHERE username =? AND password = ?', (username, make_hashes(password)))
     data = c.fetchall()
     conn.close()
     return data
@@ -74,179 +78,215 @@ def get_user_history(username):
     conn.close()
     return df
 
-# --- FUNCIONES DE LÓGICA ---
+# --- LÓGICA DE IA ---
 
-def analyze_contract_text(text_content):
+def analyze_general_contract(text_content):
+    """Analiza cualquier tipo de documento legal"""
     system_prompt = """
-    Eres un abogado experto en derecho inmobiliario argentino. Tu cliente es el inquilino.
-    Analiza el contrato proporcionado en busca de cláusulas abusivas, ilegales o riesgosas.
+    Actúas como un consultor legal senior experto en legislación argentina.
+    Tu tarea es proteger al usuario.
     
-    Estructura tu respuesta así:
-    1. RESUMEN EJECUTIVO: (2 líneas).
-    2. SEMÁFORO DE RIESGO: (Bajo/Medio/Alto).
-    3. ANÁLISIS DE CLÁUSULAS: Lista los puntos críticos. Cita siempre el artículo del Código Civil y Comercial (CCyC) o la Ley de Alquileres vigente que justifique tu observación.
-    4. RECOMENDACIÓN: ¿Firmar, Negociar o Rechazar?
+    PASO 1: Identifica qué tipo de documento es (Alquiler, Compraventa, Laboral, NDA, Pagaré, etc.).
+    PASO 2: Realiza un análisis de riesgos.
     
-    Usa formato Markdown claro.
+    Tu respuesta debe tener este formato:
+    ### 📂 Tipo de Documento: [Nombre del tipo]
+    
+    ### 🚦 Nivel de Riesgo: [Bajo/Medio/Alto]
+    
+    ### ⚠️ Puntos Críticos y Cláusulas Abusivas:
+    * [Punto 1]: Explica por qué es riesgoso y cita la ley vigente (CCyC, LCT, etc).
+    * [Punto 2]...
+    
+    ### ✅ Recomendación Final:
+    [Consejo directo: Firmar, Negociar o Rechazar]
     """
     
     try:
         response = client.chat.completions.create(
-            model="gpt-4o", # Usa gpt-3.5-turbo si quieres gastar menos
+            model="gpt-4o", 
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"Analiza este texto legal: {text_content[:15000]}"}
+                {"role": "user", "content": f"Analiza este documento: {text_content[:20000]}"}
             ]
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"Error: {e}"
+        return f"Error en análisis: {e}"
+
+def ask_chat_question(question, contract_text, chat_history):
+    """Responde preguntas sobre el contrato cargado"""
+    messages = [
+        {"role": "system", "content": "Eres un asistente legal. Responde preguntas del usuario basándote EXCLUSIVAMENTE en el contrato que se te proporciona abajo. Si la respuesta no está en el contrato, dilo. Sé breve y claro."},
+        {"role": "system", "content": f"CONTRATO: {contract_text[:20000]}"}
+    ]
+    # Agregar historial de chat para contexto
+    messages.extend(chat_history)
+    messages.append({"role": "user", "content": question})
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages
+    )
+    return response.choices[0].message.content
 
 def create_docx(analysis_text, filename):
-    """Genera un archivo Word descargable"""
     doc = Document()
-    doc.add_heading(f'Reporte Legal: {filename}', 0)
-    
-    doc.add_paragraph(f"Fecha de análisis: {datetime.now().strftime('%d/%m/%Y')}")
-    doc.add_paragraph("Generado por IA Legal - Revisión preliminar")
-    
-    doc.add_heading('Análisis Detallado', level=1)
-    
-    # Insertar el texto del análisis
-    # (Para que se vea bien en Word, podríamos limpiar el markdown, 
-    # pero insertarlo directo es funcional para MVP)
+    doc.add_heading(f'Análisis Legal: {filename}', 0)
+    doc.add_paragraph(f"Fecha: {datetime.now().strftime('%d/%m/%Y')}")
     doc.add_paragraph(analysis_text)
-    
-    doc.add_paragraph('---')
-    doc.add_paragraph('DISCLAIMER: Este reporte fue generado por inteligencia artificial. No constituye asesoramiento legal vinculante. Consulte a un abogado matriculado.')
-    
-    # Guardar en memoria (buffer) en lugar de disco
     buffer = BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
-# --- INTERFAZ ---
-
+# --- INTERFAZ APP ---
 def main():
     init_db()
     
-    # Sidebar Login
+    # Manejo de sesión para chat
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "current_contract_text" not in st.session_state:
+        st.session_state.current_contract_text = ""
+    if "analysis_done" not in st.session_state:
+        st.session_state.analysis_done = False
+
+    # SIDEBAR (Navegación)
     with st.sidebar:
-        st.title("⚖️ LegalApp")
+        st.title("🏛️ LegalAI")
         if 'logged_in' not in st.session_state:
             st.session_state['logged_in'] = False
             
-        menu = ["Login", "Registro"]
         if st.session_state['logged_in']:
-            menu = ["App", "Salir"]
-            
-        choice = st.selectbox("Navegación", menu)
+            st.write(f"Hola, **{st.session_state['username']}**")
+            if st.button("Cerrar Sesión"):
+                st.session_state['logged_in'] = False
+                st.session_state.messages = [] # Limpiar chat
+                st.session_state.analysis_done = False
+                st.rerun()
+            st.markdown("---")
+            nav = st.radio("Ir a:", ["Nuevo Análisis", "Historial Guardado"])
+        else:
+            nav = "Login"
+
+    # PANTALLA LOGIN
+    if not st.session_state['logged_in']:
+        st.header("Identifícate")
+        tab1, tab2 = st.tabs(["Ingresar", "Registrarse"])
         
-        if choice == "Login":
+        with tab1:
             username = st.text_input("Usuario")
             password = st.text_input("Contraseña", type='password')
-            if st.button("Entrar"):
+            if st.button("Entrar", type="primary"):
                 if login_user(username, password):
                     st.session_state['logged_in'] = True
                     st.session_state['username'] = username
                     st.rerun()
                 else:
-                    st.error("Datos incorrectos")
-                    
-        elif choice == "Registro":
-            new_user = st.text_input("Nuevo Usuario")
-            new_pass = st.text_input("Nueva Contraseña", type='password')
-            if st.button("Crear Cuenta"):
-                try:
-                    add_user(new_user, new_pass)
-                    st.success("Creado. Ve a Login.")
-                except:
-                    st.warning("Ese usuario ya existe")
-                    
-        elif choice == "Salir":
-            st.session_state['logged_in'] = False
-            st.rerun()
-
-    # Main Area
-    if st.session_state['logged_in']:
-        st.header(f"Bienvenido, {st.session_state['username']}")
+                    st.error("Error en datos")
         
-        tab1, tab2 = st.tabs(["📄 Nuevo Análisis", "🗄️ Historial"])
-        
-        with tab1:
-            st.info("Sube un contrato de alquiler (PDF) para detectar cláusulas ilegales.")
-            uploaded_file = st.file_uploader("Contrato", type=['pdf', 'txt'])
-            
-            if uploaded_file and st.button("Analizar Riesgos"):
-                text_content = ""
-                
-                # Procesamiento de PDF
-                if uploaded_file.type == "application/pdf":
-                    try:
-                        reader = PdfReader(uploaded_file)
-                        for page in reader.pages:
-                            text_content += page.extract_text()
-                    except Exception as e:
-                        st.error(f"Error leyendo PDF: {e}")
-                else:
-                    # Archivos de texto
-                    text_content = uploaded_file.getvalue().decode("utf-8")
-                
-                if text_content:
-                    with st.spinner("Consultando jurisprudencia..."):
-                        # Llamada a IA
-                        analysis = analyze_contract_text(text_content)
-                        
-                        # Mostrar en pantalla
-                        st.markdown("### Resultado del Análisis")
-                        st.write(analysis)
-                        
-                        # Guardar DB
-                        save_analysis(st.session_state['username'], uploaded_file.name, analysis)
-                        
-                        # Generar Word
-                        docx_file = create_docx(analysis, uploaded_file.name)
-                        
-                        st.download_button(
-                            label="📥 Descargar Reporte en Word (.docx)",
-                            data=docx_file,
-                            file_name=f"Reporte_{uploaded_file.name}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                        )
-
         with tab2:
-            st.subheader("Tus análisis anteriores")
-            df = get_user_history(st.session_state['username'])
-            if not df.empty:
-                st.dataframe(df[['date', 'filename']], use_container_width=True)
-                
-                # Selector para ver detalles antiguos
-                seleccion = st.selectbox("Ver detalle de:", df['filename'].unique())
-                if seleccion:
-                    reporte = df[df['filename'] == seleccion].iloc[0]['analysis']
-                    st.markdown("---")
-                    st.markdown(reporte)
-                    
-                    # Botón para descargar también los viejos
-                    docx_viejo = create_docx(reporte, seleccion)
-                    st.download_button(
-                        label="Descargar este reporte antiguo",
-                        data=docx_viejo,
-                        file_name=f"Reporte_{seleccion}.docx",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key="old_download"
-                    )
-            else:
-                st.write("Aún no tienes historial.")
+            new_user = st.text_input("Crear Usuario")
+            new_pass = st.text_input("Crear Contraseña", type='password')
+            if st.button("Registrar"):
+                add_user(new_user, new_pass)
+                st.success("¡Listo! Ahora inicia sesión.")
+        return # Cortamos ejecución aquí si no hay login
 
-    else:
-        st.markdown("""
-        ### Herramienta de Auditoría Legal con IA
-        Esta herramienta utiliza Inteligencia Artificial para revisar contratos y protegerte de cláusulas abusivas.
+    # PANTALLA PRINCIPAL
+    if nav == "Nuevo Análisis":
+        st.subheader("🤖 Analista Legal Universal")
+        st.caption("Sube contratos de alquiler, laborales, servicios, pagarés, etc.")
         
-        **Por favor, inicia sesión o regístrate en el menú lateral.**
-        """)
+        uploaded_file = st.file_uploader("Sube tu documento (PDF)", type=['pdf', 'txt'])
+        
+        # Procesar Archivo
+        if uploaded_file:
+            # Botón de análisis (Solo aparece si no se ha analizado aún)
+            if not st.session_state.analysis_done:
+                if st.button("🔍 Analizar Documento", type="primary"):
+                    with st.spinner("Leyendo y buscando trampas legales..."):
+                        text_content = ""
+                        if uploaded_file.type == "application/pdf":
+                            try:
+                                reader = PdfReader(uploaded_file)
+                                for page in reader.pages:
+                                    text_content += page.extract_text()
+                            except:
+                                st.error("Error leyendo PDF.")
+                        else:
+                            text_content = uploaded_file.getvalue().decode("utf-8")
+                        
+                        if text_content:
+                            # 1. Ejecutar análisis
+                            analysis = analyze_general_contract(text_content)
+                            
+                            # 2. Guardar en estado para el chat y UI
+                            st.session_state.current_contract_text = text_content
+                            st.session_state.current_analysis = analysis
+                            st.session_state.analysis_done = True
+                            
+                            # 3. Guardar en BD
+                            save_analysis(st.session_state['username'], uploaded_file.name, analysis)
+                            st.rerun()
+
+            # Mostrar Resultados y Chat (Si ya se analizó)
+            if st.session_state.analysis_done:
+                st.success("✅ Análisis Completado")
+                
+                # Sección Resumen (Expander para que no ocupe todo el móvil)
+                with st.expander("📄 Ver Informe Legal Completo", expanded=True):
+                    st.markdown(st.session_state.current_analysis)
+                    
+                    # Descargar Word
+                    docx = create_docx(st.session_state.current_analysis, uploaded_file.name)
+                    st.download_button("📥 Bajar informe Word", docx, file_name="analisis.docx")
+                
+                st.markdown("---")
+                st.subheader("💬 Chat con tu Contrato")
+                st.caption("Pregunta cosas como: '¿Cuál es la multa si rescindo?' o '¿Es legal la cláusula 5?'")
+
+                # Mostrar historial de chat
+                for message in st.session_state.messages:
+                    with st.chat_message(message["role"]):
+                        st.markdown(message["content"])
+
+                # Input de chat
+                if prompt := st.chat_input("Escribe tu duda aquí..."):
+                    # 1. Mostrar mensaje usuario
+                    st.session_state.messages.append({"role": "user", "content": prompt})
+                    with st.chat_message("user"):
+                        st.markdown(prompt)
+
+                    # 2. Generar respuesta IA
+                    with st.chat_message("assistant"):
+                        with st.spinner("Consultando el contrato..."):
+                            response = ask_chat_question(
+                                prompt, 
+                                st.session_state.current_contract_text,
+                                st.session_state.messages[:-1] # Historial previo sin el último prompt
+                            )
+                            st.markdown(response)
+                    
+                    # 3. Guardar respuesta
+                    st.session_state.messages.append({"role": "assistant", "content": response})
+
+                # Botón para limpiar y empezar otro
+                if st.button("🔄 Analizar otro documento"):
+                    st.session_state.analysis_done = False
+                    st.session_state.messages = []
+                    st.session_state.current_contract_text = ""
+                    st.rerun()
+
+    # PANTALLA HISTORIAL
+    elif nav == "Historial Guardado":
+        st.subheader("🗄️ Tus análisis anteriores")
+        df = get_user_history(st.session_state['username'])
+        if not df.empty:
+            st.dataframe(df[['date', 'filename', 'analysis']], hide_index=True)
+        else:
+            st.info("No tienes historial aún.")
 
 if __name__ == '__main__':
     main()
